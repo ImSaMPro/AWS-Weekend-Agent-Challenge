@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Weekend Agent Challenge - Morning Briefing Agent
+
+Resources:
+  AgentSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: MorningBriefingTopic
+
+  AgentSNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AgentSNSTopic
+      Endpoint: "YOUR_EMAIL@EXAMPLE.COM" # Change this to your email
+      Protocol: email
+
+  AgentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AgentExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AgentSNSTopic
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: "*"
+
+  AgentLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: MorningBriefAgent
+      Runtime: python3.9
+      Handler: app.lambda_handler
+      Role: !GetAtt AgentLambdaRole.Arn
+      Timeout: 15
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref AgentSNSTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+              # Initialize AWS clients
+              bedrock = boto3.client('bedrock-runtime')
+              sns = boto3.client('sns')
+              
+              sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+              
+              # Define the prompt for the AI agent
+              prompt_data = "Write a short, highly motivating morning quote and one quick productivity tip for a software developer. Keep it under 3 sentences."
+              
+              # Configure the Bedrock Nova model
+              body = json.dumps({
+                  "messages": [
+                      {
+                          "role": "user",
+                          "content": [
+                              {
+                                  "text": prompt_data
+                              }
+                          ]
+                      }
+                  ],
+                  "inferenceConfig": {
+                      "maxNewTokens": 100,
+                      "temperature": 0.7
+                  }
+              })
+              
+              try:
+                  # Call the AI model
+                  response = bedrock.invoke_model(
+                      body=body,
+                      modelId='amazon.nova-micro-v1:0',
+                      accept='application/json',
+                      contentType='application/json'
+                  )
+                  
+                  response_body = json.loads(response.get('body').read())
+                  ai_message = response_body.get('output').get('message').get('content')[0].get('text')
+                  
+                  # Report back: Send the email via SNS
+                  sns.publish(
+                      TopicArn=sns_topic_arn,
+                      Subject="Your Morning AI Briefing",
+                      Message=f"Good morning!\n\nHere is your daily brief:\n{ai_message}\n\n- Your AWS Agent"
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Briefing sent successfully!')
+                  }
+                  
+              except Exception as e:
+                  print(f"Error generating brief: {e}")
+                  raise e
+
+  AgentScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Triggers the agent every morning at 8 AM UTC
+      ScheduleExpression: "cron(0 8 * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AgentLambdaFunction.Arn
+          Id: "MorningBriefTarget"
+
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgentLambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt AgentScheduleRule.Arn
+
+  AgentLambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !Ref AgentLambdaFunction
+
+  PermissionForURLToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgentLambdaFunction
+      Action: "lambda:InvokeFunctionUrl"
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  TestUrl:
+    Description: "URL to trigger the Morning Brief Agent Lambda function immediately for testing"
+    Value: !GetAtt AgentLambdaFunctionUrl.FunctionUrl
