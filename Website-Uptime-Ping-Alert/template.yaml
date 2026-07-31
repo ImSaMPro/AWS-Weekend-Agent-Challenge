@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Website Uptime & Ping Alert system. Provisions a Python 3.12 Lambda function triggered by 
+  EventBridge every 5 minutes to ping a TargetURL and send SES email alerts if down.
+
+Parameters:
+  TargetURL:
+    Type: String
+    Description: The website URL to monitor (e.g., https://mywebsite.com).
+    Default: https://example.com
+    AllowedPattern: '^https?://.+'
+    ConstraintDescription: Must be a valid HTTP or HTTPS URL starting with http:// or https://.
+
+  AlertEmail:
+    Type: String
+    Description: The email address that will receive downtime alerts (must be an SES-verified identity).
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: Must be a valid email address.
+
+Resources:
+  # -------------------------------------------------------------------
+  # IAM Execution Role for Lambda Function (Least Privilege)
+  # -------------------------------------------------------------------
+  UptimeLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SESSendEmailPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: '*'
+
+  # -------------------------------------------------------------------
+  # AWS Lambda Function (Python 3.12 Core Logic)
+  # -------------------------------------------------------------------
+  UptimePingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-ping-function'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt UptimeLambdaExecutionRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          TARGET_URL: !Ref TargetURL
+          ALERT_EMAIL: !Ref AlertEmail
+      Code:
+        ZipFile: |
+          import os, urllib.request, urllib.error, boto3
+
+          def lambda_handler(event, context):
+              target_url = os.environ['TARGET_URL']
+              alert_email = os.environ['ALERT_EMAIL']
+              try:
+                  req = urllib.request.Request(target_url, headers={'User-Agent': 'UptimePingAgent/1.0'})
+                  with urllib.request.urlopen(req, timeout=10) as res:
+                      if res.status == 200:
+                          return {'statusCode': 200, 'body': 'OK'}
+                      error_details = f"HTTP Status Code: {res.status}"
+              except Exception as e:
+                  error_details = str(e)
+
+              ses = boto3.client('ses')
+              ses.send_email(
+                  Source=alert_email,
+                  Destination={'ToAddresses': [alert_email]},
+                  Message={
+                      'Subject': {'Data': f"ALERT: Website Downtime Detected - {target_url}"},
+                      'Body': {'Text': {'Data': f"Downtime alert triggered for {target_url}.\nDetails: {error_details}"}}
+                  }
+              )
+              return {'statusCode': 500, 'body': f"Alert sent: {error_details}"}
+
+  # -------------------------------------------------------------------
+  # EventBridge Rule (Scheduled Ping Every 5 Minutes)
+  # -------------------------------------------------------------------
+  UptimePingScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-schedule-rule'
+      Description: Triggers the Uptime Ping Lambda function every 5 minutes.
+      ScheduleExpression: 'rate(5 minutes)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UptimePingLambdaFunction.Arn
+          Id: UptimePingLambdaTarget
+
+  # -------------------------------------------------------------------
+  # Lambda Invocation Permission for EventBridge
+  # -------------------------------------------------------------------
+  UptimePingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UptimePingLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UptimePingScheduleRule.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Uptime Ping Lambda Function
+    Value: !GetAtt UptimePingLambdaFunction.Arn
+
+  EventBridgeRuleArn:
+    Description: ARN of the EventBridge Scheduled Rule
+    Value: !GetAtt UptimePingScheduleRule.Arn
+
+  TargetURL:
+    Description: Monitored Website URL
+    Value: !Ref TargetURL
+
+  AlertEmail:
+    Description: Alert Recipient & Sender Email Address
+    Value: !Ref AlertEmail

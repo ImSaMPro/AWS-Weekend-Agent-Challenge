@@ -15,6 +15,14 @@ An automated AI agent that sends a motivating morning quote and a developer prod
   - [Project README](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Morning%20Brief%20Agent/README.md)
   - [Testing Helper (demo.py)](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Morning%20Brief%20Agent/demo.py)
 
+### 2. [Website Uptime & Ping Alert](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Website-Uptime-Ping-Alert)
+A single-template AWS serverless monitoring system that periodically pings a target URL and dispatches SES email alerts upon HTTP failure or timeout.
+
+- **Key Technologies**: AWS Lambda (Python 3.12 inline ZipFile), Amazon EventBridge (Cron/Rate Schedule), Amazon SES, IAM Least Privilege.
+- **Links**:
+  - [CloudFormation Template (template.yaml)](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Website-Uptime-Ping-Alert/template.yaml)
+  - [Project README](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Website-Uptime-Ping-Alert/README.md)
+
 ---
 
 ## Quick Start
