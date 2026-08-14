@@ -23,6 +23,15 @@ A single-template AWS serverless monitoring system that periodically pings a tar
   - [CloudFormation Template (template.yaml)](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Website-Uptime-Ping-Alert/template.yaml)
   - [Project README](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Website-Uptime-Ping-Alert/README.md)
 
+### 3. [Daily Color Palette Extractor](./Daily-Color-Palette-Extractor)
+A serverless, client-side web application that extracts the 5 dominant colors from any uploaded image using the Median Cut algorithm. Runs entirely in the browser — no backend or AI APIs required.
+
+- **Key Technologies**: HTML5 Canvas, Vanilla JavaScript, Amazon S3, Amazon CloudFront (Origin Access Control).
+- **Links**:
+  - [Application (index.html)](./Daily-Color-Palette-Extractor/index.html)
+  - [CloudFormation Template (template.yaml)](./Daily-Color-Palette-Extractor/template.yaml)
+  - [Project README](./Daily-Color-Palette-Extractor/README.md)
+
 ---
 
 ## Quick Start

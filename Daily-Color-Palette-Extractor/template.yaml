@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Daily Color Palette Extractor - Static Website Infrastructure
+  Deploys an S3 bucket for static hosting behind a CloudFront distribution
+  using Origin Access Control (OAC) for secure, non-public bucket access.
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+Parameters:
+  ProjectName:
+    Type: String
+    Default: daily-color-palette-extractor
+    Description: Project name used for resource naming
+
+# =============================================================================
+# RESOURCES
+# =============================================================================
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # S3 Bucket - Stores the static website files (index.html, assets, etc.)
+  # The bucket is NOT configured for public access. CloudFront serves content.
+  # ---------------------------------------------------------------------------
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  # S3 Bucket Policy - Grants CloudFront (via OAC) read access to bucket objects
+  # ---------------------------------------------------------------------------
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+
+  # ---------------------------------------------------------------------------
+  # CloudFront Origin Access Control (OAC)
+  # Securely connects CloudFront to the S3 bucket without making it public.
+  # ---------------------------------------------------------------------------
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ProjectName}-oac'
+        Description: OAC for Color Palette Extractor S3 bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ---------------------------------------------------------------------------
+  # CloudFront Distribution - CDN that serves the static site over HTTPS
+  # ---------------------------------------------------------------------------
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub '${ProjectName} - Static Website Distribution'
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        # Origin configuration pointing to the S3 bucket
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        # Default cache behavior
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          # Use AWS Managed CachingOptimized policy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        # Custom error responses for SPA-like behavior
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+Outputs:
+  S3BucketName:
+    Description: Name of the S3 bucket hosting the static website files
+    Value: !Ref WebsiteBucket
+
+  CloudFrontDomainName:
+    Description: CloudFront distribution URL (access the app here)
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID (useful for cache invalidation)
+    Value: !Ref CloudFrontDistribution
