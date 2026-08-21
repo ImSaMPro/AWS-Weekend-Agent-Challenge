@@ -23,7 +23,15 @@ A single-template AWS serverless monitoring system that periodically pings a tar
   - [CloudFormation Template (template.yaml)](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Website-Uptime-Ping-Alert/template.yaml)
   - [Project README](file:///d:/Projects/GitHub/AWS-Weekend-Agent-Challenge/Website-Uptime-Ping-Alert/README.md)
 
-### 3. [Daily Color Palette Extractor](./Daily-Color-Palette-Extractor)
+### 3. [Daily Haiku Agent](./Daily-Haiku-Agent)
+An always-on creative agent that generates a unique, themed haiku every morning and delivers it to your inbox. Themes adapt to the current season and day of the week.
+
+- **Key Technologies**: AWS Lambda (Python 3.12), Amazon Bedrock (Nova Micro), Amazon SNS, Amazon EventBridge (Cron), Lambda Function URL.
+- **Links**:
+  - [CloudFormation Template (template.yaml)](./Daily-Haiku-Agent/template.yaml)
+  - [Project README](./Daily-Haiku-Agent/README.md)
+
+### 4. [Daily Color Palette Extractor](./Daily-Color-Palette-Extractor)
 A serverless, client-side web application that extracts the 5 dominant colors from any uploaded image using the Median Cut algorithm. Runs entirely in the browser — no backend or AI APIs required.
 
 - **Key Technologies**: HTML5 Canvas, Vanilla JavaScript, Amazon S3, Amazon CloudFront (Origin Access Control).

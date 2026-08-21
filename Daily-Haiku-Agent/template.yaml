@@ -1,0 +1,326 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Daily Haiku Agent - An always-on creative agent that generates a themed haiku
+  every morning and delivers it via email using Amazon Bedrock (Nova Micro).
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+Parameters:
+  EmailAddress:
+    Type: String
+    Description: Email address to receive the daily haiku (you must confirm the SNS subscription)
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: Must be a valid email address
+
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 8 * * ? *)'
+    Description: >
+      Cron expression for when the haiku is generated (default: 8:00 AM UTC daily).
+      Format: cron(minutes hours day-of-month month day-of-week year)
+
+  BedrockModelId:
+    Type: String
+    Default: 'amazon.nova-micro-v1:0'
+    Description: Bedrock model ID to use for haiku generation
+
+# =============================================================================
+# GLOBALS
+# =============================================================================
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.12
+    MemorySize: 128
+
+# =============================================================================
+# RESOURCES
+# =============================================================================
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # SNS Topic - Delivers the daily haiku via email
+  # ---------------------------------------------------------------------------
+  HaikuSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: daily-haiku-agent-topic
+      DisplayName: Daily Haiku Agent
+
+  # ---------------------------------------------------------------------------
+  # SNS Subscription - Email endpoint (requires manual confirmation)
+  # ---------------------------------------------------------------------------
+  HaikuSNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref HaikuSNSTopic
+      Protocol: email
+      Endpoint: !Ref EmailAddress
+
+  # ---------------------------------------------------------------------------
+  # IAM Role for Lambda - Grants access to Bedrock and SNS
+  # ---------------------------------------------------------------------------
+  HaikuLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: daily-haiku-agent-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        # CloudWatch Logs - for Lambda logging
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        # Bedrock - invoke model for haiku generation
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+        # SNS - publish haiku to topic
+        - PolicyName: SNSPublishPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref HaikuSNSTopic
+
+  # ---------------------------------------------------------------------------
+  # Lambda Function - Generates and sends the daily haiku
+  # Uses inline code (ZipFile) so no S3 bucket is needed for deployment.
+  # ---------------------------------------------------------------------------
+  HaikuLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: daily-haiku-agent
+      Handler: index.lambda_handler
+      Role: !GetAtt HaikuLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref HaikuSNSTopic
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Code:
+        ZipFile: |
+          """
+          Daily Haiku Agent - Lambda Handler
+          Generates a themed haiku using Amazon Bedrock and publishes it via SNS.
+          """
+          import json
+          import os
+          import boto3
+          from datetime import datetime, timezone
+
+          # Initialize AWS clients
+          bedrock = boto3.client('bedrock-runtime')
+          sns = boto3.client('sns')
+
+          # Environment variables
+          SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+          BEDROCK_MODEL_ID = os.environ['BEDROCK_MODEL_ID']
+
+          # Seasonal and daily themes for variety
+          SEASONS = {
+              1: 'winter', 2: 'winter', 3: 'spring',
+              4: 'spring', 5: 'spring', 6: 'summer',
+              7: 'summer', 8: 'summer', 9: 'autumn',
+              10: 'autumn', 11: 'autumn', 12: 'winter'
+          }
+
+          DAY_THEMES = {
+              0: 'new beginnings (Monday)',
+              1: 'growth and effort (Tuesday)',
+              2: 'midweek reflection (Wednesday)',
+              3: 'perseverance (Thursday)',
+              4: 'gratitude and celebration (Friday)',
+              5: 'exploration and rest (Saturday)',
+              6: 'peace and renewal (Sunday)'
+          }
+
+
+          def lambda_handler(event, context):
+              """Main handler: generate a haiku and send it via email."""
+              
+              # Determine today's theme context
+              now = datetime.now(timezone.utc)
+              season = SEASONS[now.month]
+              day_theme = DAY_THEMES[now.weekday()]
+              date_str = now.strftime('%A, %B %d, %Y')
+              
+              # Build the prompt
+              prompt = (
+                  f"Today is {date_str}. The season is {season}. "
+                  f"The theme for today is: {day_theme}.\n\n"
+                  f"Write a single haiku (three lines: 5-7-5 syllables) inspired by "
+                  f"today's season and theme. The haiku should be contemplative, "
+                  f"vivid, and evoke nature or human emotion.\n\n"
+                  f"Return ONLY the haiku — three lines, nothing else. "
+                  f"No title, no explanation, no extra text."
+              )
+              
+              # Call Amazon Bedrock
+              haiku = invoke_bedrock(prompt)
+              
+              # Format the email
+              subject = f"Your Daily Haiku - {date_str}"
+              message = format_email(haiku, season, day_theme, date_str)
+              
+              # Publish to SNS
+              sns.publish(
+                  TopicArn=SNS_TOPIC_ARN,
+                  Subject=subject,
+                  Message=message
+              )
+              
+              print(f"Haiku sent successfully for {date_str}")
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Haiku delivered',
+                      'date': date_str,
+                      'haiku': haiku
+                  })
+              }
+
+
+          def invoke_bedrock(prompt):
+              """Invoke Amazon Bedrock Nova Micro to generate a haiku."""
+              request_body = json.dumps({
+                  "messages": [
+                      {
+                          "role": "user",
+                          "content": [{"text": prompt}]
+                      }
+                  ],
+                  "inferenceConfig": {
+                      "maxTokens": 100,
+                      "temperature": 0.9,
+                      "topP": 0.95
+                  }
+              })
+              
+              response = bedrock.invoke_model(
+                  modelId=BEDROCK_MODEL_ID,
+                  contentType='application/json',
+                  accept='application/json',
+                  body=request_body
+              )
+              
+              response_body = json.loads(response['body'].read())
+              haiku = response_body['output']['message']['content'][0]['text'].strip()
+              return haiku
+
+
+          def format_email(haiku, season, day_theme, date_str):
+              """Format a clean email with the haiku and metadata."""
+              return (
+                  f"{'=' * 40}\n"
+                  f"   YOUR DAILY HAIKU\n"
+                  f"   {date_str}\n"
+                  f"{'=' * 40}\n\n"
+                  f"{haiku}\n\n"
+                  f"{'─' * 40}\n"
+                  f"Season: {season.capitalize()}\n"
+                  f"Theme: {day_theme}\n"
+                  f"{'─' * 40}\n\n"
+                  f"Generated by Daily Haiku Agent\n"
+                  f"Powered by Amazon Bedrock (Nova Micro)\n"
+              )
+
+  # ---------------------------------------------------------------------------
+  # EventBridge Rule - Triggers Lambda on schedule (daily at 8 AM UTC)
+  # ---------------------------------------------------------------------------
+  HaikuScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: daily-haiku-agent-schedule
+      Description: Triggers the Daily Haiku Agent Lambda every morning
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: HaikuLambdaTarget
+          Arn: !GetAtt HaikuLambdaFunction.Arn
+
+  # ---------------------------------------------------------------------------
+  # Lambda Permission - Allows EventBridge to invoke the function
+  # ---------------------------------------------------------------------------
+  HaikuLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HaikuLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HaikuScheduleRule.Arn
+
+  # ---------------------------------------------------------------------------
+  # Lambda Function URL - For manual testing (invoke anytime without waiting)
+  # ---------------------------------------------------------------------------
+  HaikuFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt HaikuLambdaFunction.Arn
+
+  # Permission: allow public access to invoke via Function URL
+  HaikuFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: HaikuFunctionUrl
+    Properties:
+      FunctionName: !Ref HaikuLambdaFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # Permission: allow public lambda:InvokeFunction (required since Oct 2025)
+  HaikuFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: HaikuFunctionUrl
+    Properties:
+      FunctionName: !Ref HaikuLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: '*'
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+Outputs:
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref HaikuLambdaFunction
+
+  SNSTopicArn:
+    Description: ARN of the SNS topic (confirm your email subscription!)
+    Value: !Ref HaikuSNSTopic
+
+  TestUrl:
+    Description: Function URL to trigger a haiku manually (no auth required)
+    Value: !GetAtt HaikuFunctionUrl.FunctionUrl
+
+  ScheduleExpression:
+    Description: Current schedule for haiku generation
+    Value: !Ref ScheduleExpression
+
+  EventBridgeRuleName:
+    Description: Name of the EventBridge rule (disable this to stop scheduled runs)
+    Value: !Ref HaikuScheduleRule
