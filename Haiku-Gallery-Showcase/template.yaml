@@ -1,0 +1,397 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Haiku Gallery Showcase - An always-on creative agent that generates a themed
+  haiku every morning, emails it via SNS, and publishes it to a public web page
+  served securely through CloudFront. Combines an AI agent with a static web app.
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+Parameters:
+  EmailAddress:
+    Type: String
+    Description: Email to receive the daily haiku (confirm the SNS subscription)
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: Must be a valid email address
+
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 8 * * ? *)'
+    Description: 'Cron for haiku generation (default: 8:00 AM UTC daily)'
+
+  BedrockModelId:
+    Type: String
+    Default: 'amazon.nova-micro-v1:0'
+    Description: Bedrock model ID used for haiku generation
+
+# =============================================================================
+# RESOURCES
+# =============================================================================
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # S3 Bucket - Hosts the static site (index.html) and daily haiku JSON.
+  # Private: only CloudFront can read it via Origin Access Control.
+  # ---------------------------------------------------------------------------
+  GalleryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'haiku-gallery-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # CORS so the browser can fetch latest.json from the CloudFront origin
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET]
+            AllowedOrigins: ['*']
+            AllowedHeaders: ['*']
+            MaxAge: 3000
+
+  # ---------------------------------------------------------------------------
+  # Bucket Policy - Allows CloudFront (via OAC) to read objects
+  # ---------------------------------------------------------------------------
+  GalleryBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref GalleryBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${GalleryBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${GalleryDistribution}'
+
+  # ---------------------------------------------------------------------------
+  # CloudFront Origin Access Control (OAC)
+  # ---------------------------------------------------------------------------
+  GalleryOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: haiku-gallery-oac
+        Description: OAC for Haiku Gallery S3 bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ---------------------------------------------------------------------------
+  # CloudFront Distribution - Serves the site over HTTPS
+  # ---------------------------------------------------------------------------
+  GalleryDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Haiku Gallery - Static Website Distribution
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt GalleryBucket.RegionalDomainName
+            OriginAccessControlId: !Ref GalleryOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # AWS Managed CachingOptimized policy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+
+  # ---------------------------------------------------------------------------
+  # SNS Topic + Email Subscription
+  # ---------------------------------------------------------------------------
+  HaikuSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: haiku-gallery-topic
+      DisplayName: Haiku Gallery
+
+  HaikuSNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref HaikuSNSTopic
+      Protocol: email
+      Endpoint: !Ref EmailAddress
+
+  # ---------------------------------------------------------------------------
+  # IAM Role for Lambda
+  # ---------------------------------------------------------------------------
+  HaikuLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: haiku-gallery-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+        - PolicyName: SNSPublishPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref HaikuSNSTopic
+        - PolicyName: S3WritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${GalleryBucket.Arn}/*'
+
+  # ---------------------------------------------------------------------------
+  # Lambda Function - Generates haiku, emails it, and writes latest.json to S3
+  # ---------------------------------------------------------------------------
+  HaikuLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: haiku-gallery-agent
+      Handler: index.lambda_handler
+      Role: !GetAtt HaikuLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref HaikuSNSTopic
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BUCKET_NAME: !Ref GalleryBucket
+      Code:
+        ZipFile: |
+          """
+          Haiku Gallery Agent - Lambda Handler
+          Generates a themed haiku with Amazon Bedrock, emails it via SNS,
+          and writes it to S3 as latest.json for the web gallery to display.
+          """
+          import json
+          import os
+          import boto3
+          from datetime import datetime, timezone
+
+          bedrock = boto3.client('bedrock-runtime')
+          sns = boto3.client('sns')
+          s3 = boto3.client('s3')
+
+          SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+          BEDROCK_MODEL_ID = os.environ['BEDROCK_MODEL_ID']
+          BUCKET_NAME = os.environ['BUCKET_NAME']
+
+          SEASONS = {
+              1: 'winter', 2: 'winter', 3: 'spring', 4: 'spring',
+              5: 'spring', 6: 'summer', 7: 'summer', 8: 'summer',
+              9: 'autumn', 10: 'autumn', 11: 'autumn', 12: 'winter'
+          }
+
+          DAY_THEMES = {
+              0: 'new beginnings (Monday)',
+              1: 'growth and effort (Tuesday)',
+              2: 'midweek reflection (Wednesday)',
+              3: 'perseverance (Thursday)',
+              4: 'gratitude and celebration (Friday)',
+              5: 'exploration and rest (Saturday)',
+              6: 'peace and renewal (Sunday)'
+          }
+
+
+          def lambda_handler(event, context):
+              now = datetime.now(timezone.utc)
+              season = SEASONS[now.month]
+              day_theme = DAY_THEMES[now.weekday()]
+              date_str = now.strftime('%A, %B %d, %Y')
+
+              prompt = (
+                  f"Today is {date_str}. The season is {season}. "
+                  f"The theme for today is: {day_theme}.\n\n"
+                  f"Write a single haiku (three lines: 5-7-5 syllables) inspired by "
+                  f"today's season and theme. The haiku should be contemplative, "
+                  f"vivid, and evoke nature or human emotion.\n\n"
+                  f"Return ONLY the haiku - three lines, nothing else. "
+                  f"No title, no explanation, no extra text."
+              )
+
+              haiku = invoke_bedrock(prompt)
+
+              # 1) Email via SNS
+              sns.publish(
+                  TopicArn=SNS_TOPIC_ARN,
+                  Subject=f"Your Daily Haiku - {date_str}",
+                  Message=format_email(haiku, season, day_theme, date_str)
+              )
+
+              # 2) Publish to S3 for the web gallery
+              payload = {
+                  'haiku': haiku,
+                  'lines': [ln for ln in haiku.split('\n') if ln.strip()],
+                  'season': season,
+                  'theme': day_theme,
+                  'date': date_str,
+                  'generatedAt': now.isoformat()
+              }
+              s3.put_object(
+                  Bucket=BUCKET_NAME,
+                  Key='latest.json',
+                  Body=json.dumps(payload, ensure_ascii=False),
+                  ContentType='application/json',
+                  CacheControl='no-cache, max-age=0'
+              )
+
+              print(f"Haiku published for {date_str}")
+              return {'statusCode': 200, 'body': json.dumps(payload, ensure_ascii=False)}
+
+
+          def invoke_bedrock(prompt):
+              request_body = json.dumps({
+                  "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                  "inferenceConfig": {"maxTokens": 100, "temperature": 0.9, "topP": 0.95}
+              })
+              response = bedrock.invoke_model(
+                  modelId=BEDROCK_MODEL_ID,
+                  contentType='application/json',
+                  accept='application/json',
+                  body=request_body
+              )
+              body = json.loads(response['body'].read())
+              return body['output']['message']['content'][0]['text'].strip()
+
+
+          def format_email(haiku, season, day_theme, date_str):
+              return (
+                  f"{'=' * 40}\n"
+                  f"   YOUR DAILY HAIKU\n"
+                  f"   {date_str}\n"
+                  f"{'=' * 40}\n\n"
+                  f"{haiku}\n\n"
+                  f"{'-' * 40}\n"
+                  f"Season: {season.capitalize()}\n"
+                  f"Theme: {day_theme}\n"
+                  f"{'-' * 40}\n\n"
+                  f"See the web gallery for today's haiku.\n"
+                  f"Powered by Amazon Bedrock (Nova Micro)\n"
+              )
+
+  # ---------------------------------------------------------------------------
+  # EventBridge Rule - daily trigger
+  # ---------------------------------------------------------------------------
+  HaikuScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: haiku-gallery-schedule
+      Description: Triggers the Haiku Gallery agent daily
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: HaikuLambdaTarget
+          Arn: !GetAtt HaikuLambdaFunction.Arn
+
+  HaikuLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HaikuLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HaikuScheduleRule.Arn
+
+  # ---------------------------------------------------------------------------
+  # Lambda Function URL - manual test trigger
+  # ---------------------------------------------------------------------------
+  HaikuFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt HaikuLambdaFunction.Arn
+
+  HaikuFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: HaikuFunctionUrl
+    Properties:
+      FunctionName: !Ref HaikuLambdaFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  HaikuFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: HaikuFunctionUrl
+    Properties:
+      FunctionName: !Ref HaikuLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: '*'
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+Outputs:
+  GalleryUrl:
+    Description: Public URL of the Haiku Gallery web page
+    Value: !Sub 'https://${GalleryDistribution.DomainName}'
+
+  S3BucketName:
+    Description: S3 bucket to upload index.html into
+    Value: !Ref GalleryBucket
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID (for cache invalidation)
+    Value: !Ref GalleryDistribution
+
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref HaikuLambdaFunction
+
+  SNSTopicArn:
+    Description: SNS topic ARN (confirm your email subscription!)
+    Value: !Ref HaikuSNSTopic
+
+  TestUrl:
+    Description: Function URL to trigger a haiku manually
+    Value: !GetAtt HaikuFunctionUrl.FunctionUrl
+
+  EventBridgeRuleName:
+    Description: EventBridge rule name (disable to stop scheduled runs)
+    Value: !Ref HaikuScheduleRule

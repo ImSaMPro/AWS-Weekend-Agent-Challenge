@@ -40,6 +40,15 @@ A serverless, client-side web application that extracts the 5 dominant colors fr
   - [CloudFormation Template (template.yaml)](./Daily-Color-Palette-Extractor/template.yaml)
   - [Project README](./Daily-Color-Palette-Extractor/README.md)
 
+### 5. [Haiku Gallery Showcase](./Haiku-Gallery-Showcase) ⭐ *Summer Finale*
+The season-finale showcase build. An always-on agent generates a themed haiku every morning, emails it, **and** publishes it to a polished public web gallery served over HTTPS. Combines an autonomous AI agent with a static web app into one project.
+
+- **Key Technologies**: AWS Lambda (Python 3.12), Amazon Bedrock (Nova Micro), Amazon SNS, Amazon EventBridge (Cron), Amazon S3, Amazon CloudFront (Origin Access Control).
+- **Links**:
+  - [Web Gallery (index.html)](./Haiku-Gallery-Showcase/index.html)
+  - [CloudFormation Template (template.yaml)](./Haiku-Gallery-Showcase/template.yaml)
+  - [Project README](./Haiku-Gallery-Showcase/README.md)
+
 ---
 
 ## Quick Start
