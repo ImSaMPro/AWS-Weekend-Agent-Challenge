@@ -58,3 +58,7 @@ Thumbs.db
 
 # Agent Customizations
 .agents/
+.kiro/
+
+# Local backups
+.env-backup/

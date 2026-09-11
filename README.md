@@ -49,6 +49,15 @@ The season-finale showcase build. An always-on agent generates a themed haiku ev
   - [CloudFormation Template (template.yaml)](./Haiku-Gallery-Showcase/template.yaml)
   - [Project README](./Haiku-Gallery-Showcase/README.md)
 
+### 6. [Portfolio Site](./Portfolio-Site)
+A fast, responsive single-page portfolio website hosted on a private Amazon S3 bucket and served securely over HTTPS through Amazon CloudFront using Origin Access Control (OAC). The entire infrastructure is one CloudFormation template and stays within the AWS Free Tier. Built by Soumyadeep Mandal.
+
+- **Key Technologies**: Amazon S3 (private bucket), Amazon CloudFront (HTTPS + caching, PriceClass_100, HTTP/2+3), Origin Access Control (OAC), AWS CloudFormation.
+- **Links**:
+  - [Portfolio (index.html)](./Portfolio-Site/index.html)
+  - [CloudFormation Template (template.yaml)](./Portfolio-Site/template.yaml)
+  - [Project README](./Portfolio-Site/README.md)
+
 ---
 
 ## Quick Start
