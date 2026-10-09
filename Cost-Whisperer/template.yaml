@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS Cost Whisperer - A friendly, on-demand conversational agent that explains
+  AWS billing, Free Tier, and "will this cost me money?" questions in plain
+  English. A single Lambda serves its own chat UI (GET) and answers questions
+  (POST) using Amazon Bedrock Nova Micro. No S3, no API Gateway, no database.
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+Parameters:
+  BedrockModelId:
+    Type: String
+    Default: 'amazon.nova-micro-v1:0'
+    Description: Bedrock model ID that powers the Whisperer persona.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    Description: How many days to keep CloudWatch logs (keeps cost near zero).
+    AllowedValues: [1, 3, 5, 7, 14, 30]
+
+# =============================================================================
+# RESOURCES
+# =============================================================================
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # IAM Role - least privilege: write logs + invoke one Bedrock model
+  # ---------------------------------------------------------------------------
+  WhispererRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cost-whisperer-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cost-whisperer:*'
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+
+  # ---------------------------------------------------------------------------
+  # Log Group - created explicitly so retention is set (cost control) and so
+  # teardown removes it cleanly instead of leaving an orphaned group behind.
+  # ---------------------------------------------------------------------------
+  WhispererLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/cost-whisperer
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------------------------------------------------------------------------
+  # Lambda Function - ONE function does everything:
+  #   GET  /  -> returns the chat web page (text/html)
+  #   POST /  -> { "message": "..." } -> Bedrock -> friendly JSON reply
+  # arm64 + 128 MB + inline code = cheapest viable shape, no deploy bucket.
+  # ---------------------------------------------------------------------------
+  WhispererFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WhispererLogGroup
+    Properties:
+      FunctionName: cost-whisperer
+      Handler: index.lambda_handler
+      Role: !GetAtt WhispererRole.Arn
+      Runtime: python3.12
+      Architectures: [arm64]
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Code:
+        ZipFile: |
+          """
+          AWS Cost Whisperer - a calm, friendly agent that demystifies AWS cost.
+          One Lambda: serves its own chat UI on GET and answers questions on POST
+          via Amazon Bedrock (Nova Micro). It always surfaces the Free-Tier angle
+          and never shows a scary raw error - just a reassuring fallback.
+          """
+          import json
+          import os
+          import boto3
+          from botocore.config import Config
+
+          MODEL_ID = os.environ['BEDROCK_MODEL_ID']
+          bedrock = boto3.client(
+              'bedrock-runtime',
+              config=Config(retries={'max_attempts': 2, 'mode': 'standard'})
+          )
+
+          # The personality that fits the job: calm, plain-spoken, reassuring,
+          # a little warm - never a lecture, never jargon without a translation.
+          SYSTEM_PROMPT = (
+              "You are the AWS Cost Whisperer: a calm, friendly guide who helps "
+              "beginners understand AWS billing and the Free Tier without fear. "
+              "Rules: (1) Answer in plain English, short paragraphs, no wall of "
+              "text. (2) Whenever money could be involved, say clearly whether it "
+              "typically falls inside the AWS Free Tier and what to watch for. "
+              "(3) Never invent exact dollar figures or quotas you are unsure of; "
+              "if unsure, say so and point to the AWS Pricing Calculator or the "
+              "Billing console. (4) Be encouraging - end with one short, calm "
+              "reassurance or a tiny next step. (5) You give general guidance, "
+              "not official financial or tax advice."
+          )
+
+          def _reply(status, body, is_html=False):
+              return {
+                  'statusCode': status,
+                  'headers': {
+                      'Content-Type': 'text/html; charset=utf-8' if is_html
+                                       else 'application/json; charset=utf-8',
+                      'Access-Control-Allow-Origin': '*',
+                      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                      'Access-Control-Allow-Headers': 'Content-Type',
+                      'Cache-Control': 'no-store'
+                  },
+                  'body': body if is_html else json.dumps(body, ensure_ascii=False)
+              }
+
+          def lambda_handler(event, context):
+              method = (
+                  event.get('requestContext', {})
+                       .get('http', {})
+                       .get('method', 'GET')
+                       .upper()
+              )
+
+              if method == 'OPTIONS':
+                  return _reply(204, {})
+
+              if method == 'GET':
+                  return _reply(200, PAGE_HTML, is_html=True)
+
+              # POST -> chat
+              try:
+                  payload = json.loads(event.get('body') or '{}')
+                  message = (payload.get('message') or '').strip()
+              except (ValueError, TypeError):
+                  message = ''
+
+              if not message:
+                  return _reply(200, {
+                      'reply': "I didn't catch a question there. Try asking me "
+                               "something like \"Does an S3 bucket cost money?\" "
+                               "and I'll walk you through it calmly."
+                  })
+
+              try:
+                  answer = ask_bedrock(message)
+                  return _reply(200, {'reply': answer})
+              except Exception as err:  # never leak a scary raw stack trace
+                  print(f"Bedrock error: {err}")
+                  return _reply(200, {
+                      'reply': "I'm having a quiet moment and couldn't reach my "
+                               "brain just now - no harm done, and nothing was "
+                               "charged. Give it another try in a few seconds. "
+                               "Meanwhile: most 'hello world' AWS projects stay "
+                               "inside the Free Tier if you tear them down after."
+                  })
+
+          def ask_bedrock(message):
+              body = json.dumps({
+                  "system": [{"text": SYSTEM_PROMPT}],
+                  "messages": [{"role": "user", "content": [{"text": message}]}],
+                  "inferenceConfig": {
+                      "maxTokens": 400,
+                      "temperature": 0.5,
+                      "topP": 0.9
+                  }
+              })
+              resp = bedrock.invoke_model(
+                  modelId=MODEL_ID,
+                  contentType='application/json',
+                  accept='application/json',
+                  body=body
+              )
+              data = json.loads(resp['body'].read())
+              return data['output']['message']['content'][0]['text'].strip()
+
+          # ---- The chat UI, served by this same Lambda on GET ----
+          PAGE_HTML = r"""<!DOCTYPE html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>AWS Cost Whisperer</title>
+          <style>
+            :root{--bg:#0b1120;--panel:#111c33;--line:#223052;--fg:#e6edf7;
+                  --muted:#93a4c3;--accent:#4ade80;--accent2:#38bdf8;--me:#1e3a5f;}
+            *{box-sizing:border-box}
+            body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+                 background:radial-gradient(1200px 600px at 70% -10%,#15233f,transparent),var(--bg);
+                 color:var(--fg);height:100vh;display:flex;flex-direction:column}
+            header{padding:18px 20px;border-bottom:1px solid var(--line);
+                   display:flex;align-items:center;gap:12px}
+            .logo{font-size:26px}
+            header h1{font-size:17px;margin:0;font-weight:650}
+            header p{margin:2px 0 0;font-size:12.5px;color:var(--muted)}
+            #chat{flex:1;overflow-y:auto;padding:20px;max-width:760px;width:100%;
+                  margin:0 auto;display:flex;flex-direction:column;gap:14px}
+            .msg{max-width:85%;padding:12px 15px;border-radius:14px;line-height:1.5;
+                 font-size:14.5px;white-space:pre-wrap;word-wrap:break-word}
+            .bot{align-self:flex-start;background:var(--panel);border:1px solid var(--line);
+                 border-top-left-radius:4px}
+            .me{align-self:flex-end;background:var(--me);border-top-right-radius:4px}
+            .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+            .chip{cursor:pointer;border:1px solid var(--line);background:#0e1830;
+                  color:var(--accent2);padding:8px 12px;border-radius:999px;font-size:13px;
+                  transition:.15s}
+            .chip:hover{border-color:var(--accent2);transform:translateY(-1px)}
+            .think{display:inline-flex;gap:4px;align-items:center}
+            .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);
+                 animation:b 1.2s infinite ease-in-out}
+            .dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}
+            @keyframes b{0%,80%,100%{opacity:.25;transform:translateY(0)}
+                         40%{opacity:1;transform:translateY(-4px)}}
+            footer{border-top:1px solid var(--line);padding:14px 20px}
+            .bar{max-width:760px;margin:0 auto;display:flex;gap:10px}
+            #q{flex:1;background:var(--panel);border:1px solid var(--line);color:var(--fg);
+               padding:13px 15px;border-radius:12px;font-size:14.5px;outline:none}
+            #q:focus{border-color:var(--accent2)}
+            #send{background:linear-gradient(135deg,var(--accent),var(--accent2));
+                  border:0;color:#06231a;font-weight:700;padding:0 20px;border-radius:12px;
+                  cursor:pointer;font-size:14.5px}
+            #send:disabled{opacity:.5;cursor:not-allowed}
+            .tag{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
+            a{color:var(--accent2)}
+          </style>
+          </head>
+          <body>
+            <header>
+              <div class="logo">💸</div>
+              <div>
+                <h1>AWS Cost Whisperer</h1>
+                <p>Your calm guide to AWS bills and the Free Tier · ask me anything</p>
+              </div>
+            </header>
+            <div id="chat"></div>
+            <footer>
+              <div class="bar">
+                <input id="q" placeholder="e.g. Will a Lambda function cost me money?" autocomplete="off">
+                <button id="send">Ask</button>
+              </div>
+              <div class="tag">General guidance, not financial advice · powered by Amazon Bedrock (Nova Micro)</div>
+            </footer>
+          <script>
+            const chat=document.getElementById('chat'),q=document.getElementById('q'),send=document.getElementById('send');
+            function bubble(text,who){const d=document.createElement('div');d.className='msg '+who;d.textContent=text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight;return d;}
+            function chips(items){const w=document.createElement('div');w.className='chips';items.forEach(t=>{const c=document.createElement('div');c.className='chip';c.textContent=t;c.onclick=()=>{q.value=t;ask();};w.appendChild(c);});chat.appendChild(w);chat.scrollTop=chat.scrollHeight;}
+            function thinking(){const d=document.createElement('div');d.className='msg bot';d.innerHTML='<span class="think"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';chat.appendChild(d);chat.scrollTop=chat.scrollHeight;return d;}
+            async function ask(){const text=q.value.trim();if(!text)return;q.value='';send.disabled=true;bubble(text,'me');const t=thinking();
+              try{const r=await fetch('',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
+                const j=await r.json();t.remove();bubble(j.reply||"Hmm, I came back empty - try rephrasing?",'bot');}
+              catch(e){t.remove();bubble("I couldn't reach the server, but don't worry - nothing was charged. Try again in a moment.",'bot');}
+              finally{send.disabled=false;q.focus();}}
+            send.onclick=ask;q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
+            // Friendly first run
+            bubble("Hi there! 👋 I'm the Cost Whisperer. AWS billing can feel scary, so I keep it calm and plain. Ask me anything - or tap a starter below.",'bot');
+            chips(["Is the AWS Free Tier really free?","Does an S3 bucket cost money?","Will this portfolio project charge me?"]);
+            q.focus();
+          </script>
+          </body>
+          </html>"""
+
+  # ---------------------------------------------------------------------------
+  # Function URL - public HTTPS endpoint (no auth) so anyone can chat
+  # ---------------------------------------------------------------------------
+  WhispererUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt WhispererFunction.Arn
+      Cors:
+        AllowOrigins: ['*']
+        AllowMethods: ['GET', 'POST']
+        AllowHeaders: ['content-type']
+
+  # Permission: allow public access via Function URL
+  WhispererUrlPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: WhispererUrl
+    Properties:
+      FunctionName: !Ref WhispererFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # Permission: public lambda:InvokeFunction (required for Function URLs since Oct 2025)
+  WhispererInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: WhispererUrl
+    Properties:
+      FunctionName: !Ref WhispererFunction
+      Action: lambda:InvokeFunction
+      Principal: '*'
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+Outputs:
+  WhispererUrl:
+    Description: Open this URL to chat with the Cost Whisperer agent.
+    Value: !GetAtt WhispererUrl.FunctionUrl
+
+  LambdaFunctionName:
+    Description: Name of the Lambda function.
+    Value: !Ref WhispererFunction
+
+  BedrockModelId:
+    Description: Bedrock model powering the agent.
+    Value: !Ref BedrockModelId

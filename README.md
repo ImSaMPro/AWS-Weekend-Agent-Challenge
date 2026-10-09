@@ -58,6 +58,15 @@ A fast, responsive single-page portfolio website hosted on a private Amazon S3 b
   - [CloudFormation Template (template.yaml)](./Portfolio-Site/template.yaml)
   - [Project README](./Portfolio-Site/README.md)
 
+### 7. [Cost Whisperer](./Cost-Whisperer)
+A friendly, on-demand conversational agent that explains AWS billing, the Free Tier, and "will this cost me money?" questions in plain English. A single Lambda serves its own chat UI and answers questions through Amazon Bedrock (Nova Micro) — reassuring tone, friendly first run, and no scary raw errors. Built by Soumyadeep Mandal.
+
+- **Key Technologies**: AWS Lambda (Python 3.12, arm64), Lambda Function URL, Amazon Bedrock (Nova Micro), Amazon CloudWatch Logs, IAM Least Privilege, AWS CloudFormation.
+- **Key Detail**: One Lambda hosts both the chat web page (GET) and the chat API (POST) — no S3, API Gateway, or database.
+- **Links**:
+  - [CloudFormation Template (template.yaml)](./Cost-Whisperer/template.yaml)
+  - [Project README](./Cost-Whisperer/README.md)
+
 ---
 
 ## Quick Start
