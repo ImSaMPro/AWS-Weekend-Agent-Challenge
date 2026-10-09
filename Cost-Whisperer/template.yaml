@@ -4,6 +4,7 @@ Description: >
   AWS billing, Free Tier, and "will this cost me money?" questions in plain
   English. A single Lambda serves its own chat UI (GET) and answers questions
   (POST) using Amazon Bedrock Nova Micro. No S3, no API Gateway, no database.
+  Built by Soumyadeep Mandal (https://www.linkedin.com/in/imsampro).
 
 # =============================================================================
 # PARAMETERS
@@ -214,6 +215,7 @@ Resources:
             .logo{font-size:26px}
             header h1{font-size:17px;margin:0;font-weight:650}
             header p{margin:2px 0 0;font-size:12.5px;color:var(--muted)}
+            header .by{font-size:11.5px;color:var(--accent2);margin-top:3px;opacity:.9}
             #chat{flex:1;overflow-y:auto;padding:20px;max-width:760px;width:100%;
                   margin:0 auto;display:flex;flex-direction:column;gap:14px}
             .msg{max-width:85%;padding:12px 15px;border-radius:14px;line-height:1.5;
@@ -247,10 +249,11 @@ Resources:
           </head>
           <body>
             <header>
-              <div class="logo">💸</div>
+              <div class="logo">&#128184;</div>
               <div>
                 <h1>AWS Cost Whisperer</h1>
-                <p>Your calm guide to AWS bills and the Free Tier · ask me anything</p>
+                <p>Your calm guide to AWS bills and the Free Tier &middot; ask me anything</p>
+                <p class="by">by Soumyadeep Mandal</p>
               </div>
             </header>
             <div id="chat"></div>
@@ -259,7 +262,7 @@ Resources:
                 <input id="q" placeholder="e.g. Will a Lambda function cost me money?" autocomplete="off">
                 <button id="send">Ask</button>
               </div>
-              <div class="tag">General guidance, not financial advice · powered by Amazon Bedrock (Nova Micro)</div>
+              <div class="tag">General guidance, not financial advice &middot; powered by Amazon Bedrock (Nova Micro)</div>
             </footer>
           <script>
             const chat=document.getElementById('chat'),q=document.getElementById('q'),send=document.getElementById('send');
@@ -273,7 +276,7 @@ Resources:
               finally{send.disabled=false;q.focus();}}
             send.onclick=ask;q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
             // Friendly first run
-            bubble("Hi there! 👋 I'm the Cost Whisperer. AWS billing can feel scary, so I keep it calm and plain. Ask me anything - or tap a starter below.",'bot');
+            bubble("Hi there! \u{1F44B} I'm the Cost Whisperer. AWS billing can feel scary, so I keep it calm and plain. Ask me anything - or tap a starter below.",'bot');
             chips(["Is the AWS Free Tier really free?","Does an S3 bucket cost money?","Will this portfolio project charge me?"]);
             q.focus();
           </script>
